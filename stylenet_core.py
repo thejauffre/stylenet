@@ -6,7 +6,7 @@ import numpy as np
 import skimage
 import skimage.io
 import skimage.transform
-
+from functools import reduce
 
 def load_image(path, height=None, width=None):
     # load image
@@ -24,11 +24,11 @@ def load_image(path, height=None, width=None):
     else:
         ny = img.shape[0]
         nx = img.shape[1]
-    return skimage.transform.resize(img, (ny, nx))
+    return skimage.transform.resize(img, (img.shape[0]//4, img.shape[1]//4))
 
 
 def l2_norm(f, reduction_indices=None, keep_dims=False):
-    return tf.sqrt(tf.reduce_sum(tf.square(f), reduction_indices=reduction_indices, keep_dims=keep_dims))
+    return tf.sqrt(tf.reduce_sum(tf.square(f)))
 
 
 def l2_norm_cost(v):
@@ -38,7 +38,7 @@ def l2_norm_cost(v):
 
 
 def l2_normalise(v, reduction_indices):
-    return v / l2_norm(v, reduction_indices=reduction_indices, keep_dims=True)
+    return v / l2_norm(v, keep_dims=True)
 
 
 def get_constant(sess, t):
@@ -67,7 +67,7 @@ def get_style_cost_gram(sess, vgg_style, vgg_var):
     factor = 1000
     style_cost_array = []
     len = var_pool.__len__()
-    for i in xrange(len):
+    for i in range(len):
         dim = var_pool[i].get_shape().as_list()
         size = reduce(lambda x, y: x * y, dim)
         G1 = gram_matrix(var_pool[i])
@@ -86,15 +86,15 @@ def _slice_patches_np(sess, v):
 
     dim = v_out.shape
     ot = time.time()
-    print "slice started", dim
+    print ("slice started", dim)
     h, w, d = dim[0], dim[1], dim[2]
     ph, pw = h - 2, w - 2
     pn = ph * pw
 
     filters_out = np.empty([pn, 3, 3, d, 1])
     k = 0
-    for y in xrange(ph):
-        for x in xrange(pw):
+    for y in range(ph):
+        for x in range(pw):
             s = v_out[y:y + 3, x:x + 3]
             filters_out[k] = s
             k += 1
@@ -103,7 +103,7 @@ def _slice_patches_np(sess, v):
 
     filters = tf.constant(filters_out, tf.float32)
     assert filters.get_shape().as_list() == [3, 3, d, pn]
-    print "slice finished:", pn, time.time() - ot
+    print ("slice finished:", pn, time.time() - ot)
 
     return filters
 
@@ -120,9 +120,9 @@ def _side(x, h, stride=3):
 
 def _overlap(h, w, strides=[3, 3]):
     v = []
-    for y in xrange(h):
+    for y in range(h):
         yf = _side(y, h, strides[0])
-        for x in xrange(w):
+        for x in range(w):
             xf = _side(x, w, strides[1])
             v.append(xf * yf)
     return tf.constant(v, tf.float32, [h, w])
@@ -130,7 +130,7 @@ def _overlap(h, w, strides=[3, 3]):
 
 def _join_patches_np(sess, patches, idx):
     ot = time.time()
-    print "start joining patches"
+    print ("start joining patches")
 
     patches = tf.transpose(patches, [3, 0, 1, 2])
     patches_out = sess.run(patches)
@@ -140,17 +140,17 @@ def _join_patches_np(sess, patches, idx):
     d = patches_out.shape[3]
     p_sum = np.zeros([1, h, w, d])
     patches_map = {}
-    for r in xrange(len(idx)):
+    for r in range(len(idx)):
         row = idx[r]
-        for c in xrange(len(row)):
+        for c in range(len(row)):
             i = row[c]
             p_out = patches_out[i]
             p_sum[0, r:r + 3, c:c + 3, ] += p_out
-    print "patches map finished", len(patches_map), time.time() - ot
+    print ("patches map finished", len(patches_map), time.time() - ot)
     p_sum = tf.constant(p_sum, tf.float32) / tf.reshape(_overlap(h, w, [3, 3]), [1, h, w, 1])
     target = get_constant(sess, p_sum)
 
-    print "finished joining patches", time.time() - ot
+    print ("finished joining patches", time.time() - ot)
 
     return target
 
@@ -160,14 +160,15 @@ def _create_patch(sess, content_input, style_input, content_regions, style_regio
     h, w, d = dim[1], dim[2], dim[3]
     ph, pw = h - 2, w - 2
     pn = ph * pw
-
+    print ("content_input shape: ", content_input.get_shape())
+    print ("style_input shape: ", style_input.get_shape())
     assert content_input.get_shape() == style_input.get_shape()
     real_style = style_input
     if content_regions is not None and style_regions is not None:
         assert content_regions.get_shape().as_list()[:3] == style_regions.get_shape().as_list()[:3]
         map_len = content_input.get_shape().as_list()[3]
         mapped_content = tf.concat(3, [content_input, tf.tile(content_regions, [1, 1, 1, map_len])])
-        mapped_style = tf.concat(3, [style_input, tf.tile(style_regions, [1, 1, 1, map_len])])
+        mapped_style =   tf.concat(3, [style_input,   tf.tile(style_regions,   [1, 1, 1, map_len])])
     else:
         mapped_content = content_input
         mapped_style = real_style
@@ -177,12 +178,12 @@ def _create_patch(sess, content_input, style_input, content_regions, style_regio
     patches = _slice_patches_np(sess, mapped_style)
     p_matrix = l2_normalise(patches, [0, 1, 2])
 
-    conv_var = tf.nn.conv2d(mapped_content, p_matrix, [1, 1, 1, 1], "VALID", use_cudnn_on_gpu=False)
+    conv_var = tf.nn.conv2d(mapped_content, p_matrix, [1, 1, 1, 1], "VALID")
 
     content_slice = _slice_patches_np(sess, mapped_content)
 
     norm_reduce_matrix = l2_norm(content_slice, [0, 1, 2], True)
-    norm_reduce_matrix = tf.reshape(norm_reduce_matrix, [1, ph, pw, 1])
+    #norm_reduce_matrix = tf.reshape(norm_reduce_matrix, [1, ph, pw, 1])
     conv_var = conv_var / norm_reduce_matrix
     assert conv_var.get_shape().as_list() == [1, ph, pw, pn]
 
@@ -193,7 +194,7 @@ def _create_patch(sess, content_input, style_input, content_regions, style_regio
         blur = tf.tile(blur, [1, 1, pn, 1])
         conv_var = tf.nn.depthwise_conv2d(conv_var, blur, [1, 1, 1, 1], "SAME")
 
-    max_arg = tf.arg_max(conv_var, 3)
+    max_arg = tf.math.argmax(conv_var, 3)
     max_arg = tf.reshape(max_arg, [pn])
     max_arg_out = sess.run(max_arg)
 
@@ -202,17 +203,17 @@ def _create_patch(sess, content_input, style_input, content_regions, style_regio
         assert real_patches.get_shape().as_list() == [3, 3, d, pn]
         patches = real_patches
 
-    print "mapping calculation finished:", time.time() - ot
+    print ("mapping calculation finished:", time.time() - ot)
 
     assert patches.get_shape().as_list() == [3, 3, d, pn]
 
-    print "mapping finished:"
+    print ("mapping finished:")
     return max_arg_out, patches
 
 
 def get_style_cost_patch2(sess, var_input, content_input, style_input, save_file,
                           content_regions=None, style_regions=None,
-                          load_saved_mapping=True, blur_mapping=False):
+                          load_saved_mapping=False, blur_mapping=False):
     dim = var_input.get_shape().as_list()
     h, w, d = dim[1], dim[2], dim[3]
     ph, pw = h - 2, w - 2
@@ -224,7 +225,7 @@ def get_style_cost_patch2(sess, var_input, content_input, style_input, save_file
         try:
             full_patch_out = np.load(full_patch_file)
         except:
-            print "saved full patch not found"
+            print ("saved full patch not found")
     if full_patch_out is None:
         with tf.device("/cpu:0"):
             max_arg_out, patches = _create_patch(sess, content_input, style_input,
